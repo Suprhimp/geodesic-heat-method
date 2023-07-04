@@ -1,101 +1,105 @@
-import { useEffect, useRef } from "react";
-import { Mesh } from "../GeometryCore/mesh";
-import { DenseMatrix } from "../LinearAlgebra/dense-matrix";
-import { Vector } from "../LinearAlgebra/vector";
-import { colormap, hot } from "../utils/colormap";
-import * as THREE from "three";
-import { EigenModule } from "../Eigen/EigenModule";
-import { HeatMethod } from "../HeatMethod";
-import { Geometry } from "../GeometryCore/geometry";
-import { Float32BufferAttribute } from "three";
-import * as BufferGeometryUtils from "three/examples/jsm/utils/BufferGeometryUtils";
-import { useLoader } from "@react-three/fiber";
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Mesh } from '../GeometryCore/mesh';
+import { DenseMatrix } from '../LinearAlgebra/dense-matrix';
+import { Vector } from '../LinearAlgebra/vector';
+import { colormap, hot } from '../utils/colormap';
+import * as THREE from 'three';
+import { EigenModule } from '../Eigen/EigenModule';
+import { HeatMethod } from '../HeatMethod';
+import { Geometry } from '../GeometryCore/geometry';
+import { Float32BufferAttribute } from 'three';
+import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils';
+import { ThreeEvent, useLoader } from '@react-three/fiber';
 
 // @ts-ignore
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { useGLTF } from '@react-three/drei';
 
 const ORANGE = new Vector(1.0, 0.5, 0.0);
-function getColors(phi?: DenseMatrix, mesh?: Mesh) {
-    let maxPhi = 0.0;
-    if (phi) {
-        for (let i = 0; i < phi.nRows(); i++) {
-            maxPhi = Math.max(phi.get(i, 0), maxPhi);
-        }
-    }
-    let colors = [];
+function getColors(
+  distanceList: number[],
+  positionAttribute: THREE.BufferAttribute | THREE.InterleavedBufferAttribute
+) {
+  let maxPhi = 0.0;
 
-    for (let v of mesh!.vertices) {
-        let i = v.index;
+  for (let i = 0; i < distanceList.length; i++) {
+    maxPhi = Math.max(distanceList[i], maxPhi);
+  }
+  let colors = [];
+  console.log(maxPhi);
 
-        let color;
-        if (phi) {
-            color = colormap(maxPhi - phi.get(i, 0), 0, maxPhi, hot);
+  for (let i = 0; i < positionAttribute.count; i++) {
+    let color;
+    color = colormap(maxPhi - distanceList[i], 0, maxPhi, hot);
+    const ratio = distanceList[i] / maxPhi;
 
-        } else {
-            color = ORANGE;
-        }
-
-        colors[3 * i + 0] = color.x;
-        colors[3 * i + 1] = color.y;
-        colors[3 * i + 2] = color.z;
-    }
-    return colors;
+    colors[3 * i + 0] = ratio;
+    colors[3 * i + 1] = ratio;
+    colors[3 * i + 2] = ratio;
+  }
+  return colors;
 }
-
 
 export const Model = () => {
-    const model = useLoader(OBJLoader, "doghead.obj");
-    
-    const initMeshRef = useRef<THREE.Mesh>(null);
-    const heatMethodRef = useRef<HeatMethod>();
-    const deltaRef= useRef<DenseMatrix>();
+  const { scene } = useGLTF('/bottle.glb');
 
-    const calculateDistances = (x: number) => {
-        let i = heatMethodRef.current!.vertexIndex[x];
-        deltaRef.current!.set(1, i, 0);
-        let phi = deltaRef.current!.sum() > 0 ? heatMethodRef.current!.compute(deltaRef.current!) : undefined;
-        deltaRef.current!.set(0, i, 0);
+  //   const geoCoreMesh = useMemo(() => new Mesh(), []);
+  const [selectedMesh, setSelectedMesh] = useState<THREE.Mesh>(null!);
 
-        const c = getColors(phi, heatMethodRef.current?.geometry.mesh);
-        initMeshRef.current!.geometry.setAttribute("color", new Float32BufferAttribute(new Float32Array(c), 3))
+  const calcDist = (mesh: THREE.Mesh, point: THREE.Vector3) => {
+    const vertex = new THREE.Vector3();
+    const geometry = mesh.geometry;
+    const positionAttribute = geometry.attributes.position;
+    const normalAttribute = geometry.attributes.normal; // first, create an array of 'DecalVertex' objects
+    let i;
+
+    const distanceList: number[] = [];
+    if (geometry.index !== null) {
+      // indexed BufferGeometry
+      const index = geometry.index;
+
+      for (i = 0; i < index.count; i++) {
+        vertex.fromBufferAttribute(positionAttribute, index.getX(i));
+        vertex.applyMatrix4(mesh.matrixWorld);
+        distanceList.push(point.distanceTo(vertex));
+      }
+    } else {
+      // non-indexed BufferGeometry
+      for (i = 0; i < positionAttribute.count; i++) {
+        vertex.fromBufferAttribute(positionAttribute, i);
+        vertex.applyMatrix4(mesh.matrixWorld);
+        distanceList.push(point.distanceTo(vertex));
+      }
     }
 
-    useEffect(() => {
-        (async () => {
+    const c = getColors(distanceList, positionAttribute);
+    mesh.geometry.setAttribute('color', new Float32BufferAttribute(new Float32Array(c), 3));
+    console.log(mesh);
+  };
 
-            await EigenModule.init();
-            const g = BufferGeometryUtils.mergeVertices(initMeshRef.current!.geometry);
-            const m = new Mesh();
-            const vertices = [];
-            const positions = g.getAttribute("position");
-            for (let i = 0; i < positions.count; i++) {
-                vertices.push(new Vector(positions.getX(i), positions.getY(i), positions.getZ(i)))
-            }
-            const soup = {
-                f: g.index?.array,
-                v: vertices,
-            }
-            m.build(soup);
-            const geometry = new Geometry(m, soup.v);
-            let V = m.vertices.length;
-            deltaRef.current = DenseMatrix.zeros(V, 1);
-            heatMethodRef.current = new HeatMethod(geometry);
-            calculateDistances(3393);
-            initMeshRef.current!.geometry = g;
-        })();
-    }, [])
-    return <>
-        <mesh
-            ref={initMeshRef}
-            onClick={({face}) => {
-                calculateDistances(face!.a);
-            }} >
-            <bufferGeometry>
-                <bufferAttribute attach="attributes-position" name="position" args={[(model.children[0] as THREE.Mesh).geometry.attributes.position.array, 3]} />
-                <bufferAttribute attach="attributes-normal" name="normal" args={[(model.children[0] as THREE.Mesh).geometry.attributes.normal.array, 3]} />
-            </bufferGeometry>
-            <meshPhongMaterial vertexColors />
-        </mesh>
+  useEffect(() => {
+    (async () => {
+      await EigenModule.init();
+      scene.traverse((c) => {
+        if (c instanceof THREE.Mesh) {
+          c.material = new THREE.MeshBasicMaterial({ vertexColors: true });
+          //   c.material.vertexColors = true;
+        }
+      });
+    })();
+  }, [scene]);
 
-    </>
-}
+  return (
+    <primitive
+      object={scene}
+      onClick={(e: ThreeEvent<MouseEvent>) => {
+        e.stopPropagation();
+        if (e.object instanceof THREE.Mesh) {
+          setSelectedMesh(e.object);
+          calcDist(e.object, e.point);
+          //   calculateDistances(e.object, e.face!.a);
+        }
+      }}
+    />
+  );
+};
